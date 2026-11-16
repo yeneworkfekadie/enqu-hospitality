@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Create reservation</title>
+  </head>
+  <body>
+    <h1>Create reservation</h1>
+
+    {% if room_unavailable %}
+      <p>This room is no longer available. Search again to choose another room.</p>
+      <a href="{% url 'hospitality:availability' %}">Search availability</a>
+    {% else %}
+      <p>
+        {{ room.hotel.name }} — {{ room.room_type.name }},
+        room {{ room.room_number }}
+        ({{ form.check_in.value }} to {{ form.check_out.value }})
+      </p>
+      <form method="post">
+        {% csrf_token %}
+        {{ form.non_field_errors }}
+        {{ form.room.errors }}
+        {{ form.as_p }}
+        <button type="submit">Confirm reservation</button>
+      </form>
+      <a href="{% url 'hospitality:availability' %}">Back to availability</a>
+    {% endif %}
+  </body>
+</html>
