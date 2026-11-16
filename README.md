@@ -41,8 +41,8 @@ Create a virtual environment, install `requirements.txt`, and set the
 
 Room reservations use half-open date ranges (`check_in` inclusive,
 `check_out` exclusive), so one guest can check out on the day another checks
-in. PostgreSQL enforces non-overlapping confirmed or checked-in reservations
-for each room, including concurrent booking attempts.
+in. PostgreSQL enforces non-overlapping pending-payment, confirmed, or
+checked-in reservations for each room, including concurrent booking attempts.
 
 ## Staff booking workflow
 
@@ -63,7 +63,19 @@ groups still control which actions they can perform. Existing guest records
 are assigned to a hotel when their reservations identify exactly one hotel;
 unassigned or multi-hotel guest records remain visible only to superusers
 until resolved. The booking page is currently staff-only; guest self-service
-booking and Telebirr payments are planned for later phases.
+booking is available at <http://localhost:8001/bookings/public/>. The staff
+page at <http://localhost:8001/bookings/> requires staff access. Guests can
+search active hotels and submit a reservation request. Each request holds the
+room for 15 minutes as a pending-payment reservation; it is not confirmed, and
+guests must contact the hotel to complete payment. Telebirr checkout is not
+available until the official merchant integration guide is provided.
+
+Run the following command periodically (for example, once per minute in
+production) to expire pending payment holds whose deadlines have passed:
+
+```powershell
+docker compose exec -T web python manage.py expire_pending_reservations
+```
 
 ## Housekeeping
 

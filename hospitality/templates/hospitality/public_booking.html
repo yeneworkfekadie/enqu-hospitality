@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Request a reservation</title>
+  </head>
+  <body>
+    <h1>Request a reservation</h1>
+
+    {% if room_unavailable %}
+      <p>This room is no longer available. Search again to choose another room.</p>
+      <a href="{% url 'hospitality:public_availability' %}">Search availability</a>
+    {% else %}
+      <p>
+        {{ room.hotel.name }} — {{ room.room_type.name }},
+        room {{ room.room_number }}
+        ({{ form.check_in.value }} to {{ form.check_out.value }},
+        {{ form.guest_count.value }} guest{{ form.guest_count.value|pluralize }})
+      </p>
+      {% if quote %}
+        <p>
+          {{ quote.nights }} night{{ quote.nights|pluralize }} at
+          {{ quote.rate_per_night }} {{ quote.currency }} per night;
+          estimated total {{ quote.total }} {{ quote.currency }}.
+        </p>
+      {% endif %}
+      <p>
+        Submitting holds the room for {{ hold_minutes }} minutes. This request is
+        not confirmed, and online payment is not available yet. Contact the hotel
+        before the hold expires to complete your booking.
+      </p>
+      <form method="post">
+        {% csrf_token %}
+        {{ form.non_field_errors }}
+        {{ form.room.errors }}
+        {{ form.as_p }}
+        <button type="submit">Place {{ hold_minutes }}-minute hold</button>
+      </form>
+      <a href="{% url 'hospitality:public_availability' %}">Back to availability</a>
+    {% endif %}
+  </body>
+</html>

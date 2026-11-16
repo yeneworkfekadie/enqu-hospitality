@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Book a stay</title>
+  </head>
+  <body>
+    <h1>Book a stay</h1>
+    <p>Choose your hotel, dates, and guest count to find an available room.</p>
+
+    <form method="get">
+      {{ form.as_p }}
+      <button type="submit">Search availability</button>
+    </form>
+
+    {% if rooms is not None %}
+      <h2>Available rooms</h2>
+      {% if rooms %}
+        <ul>
+          {% for room in rooms %}
+            <li>
+              {{ room.hotel.name }} — {{ room.room_type.name }},
+              room {{ room.room_number }} (up to
+              {{ room.room_type.max_occupancy }} guests),
+              {{ room.room_type.base_rate }} {{ room.room_type.rate_currency }}
+              per night.
+              <a href="{% url 'hospitality:create_public_booking' %}?hotel={{ search.hotel.pk }}&amp;check_in={{ search.check_in|date:'Y-m-d' }}&amp;check_out={{ search.check_out|date:'Y-m-d' }}&amp;guest_count={{ search.guest_count }}&amp;room={{ room.pk }}">Select room</a>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>No rooms are available for those dates.</p>
+      {% endif %}
+    {% endif %}
+  </body>
+</html>

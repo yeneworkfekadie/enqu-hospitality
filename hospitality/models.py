@@ -227,11 +227,13 @@ class Guest(models.Model):
 
 class Reservation(models.Model):
     class Status(models.TextChoices):
+        PENDING_PAYMENT = "pending_payment", "Pending payment"
         CONFIRMED = "confirmed", "Confirmed"
         CHECKED_IN = "checked_in", "Checked in"
         CHECKED_OUT = "checked_out", "Checked out"
         CANCELLED = "cancelled", "Cancelled"
         NO_SHOW = "no_show", "No show"
+        EXPIRED = "expired", "Expired"
 
     room = models.ForeignKey(Room, on_delete=models.PROTECT, related_name="reservations")
     guest = models.ForeignKey(
@@ -246,6 +248,7 @@ class Reservation(models.Model):
     rate_currency = models.CharField(
         max_length=3, choices=Currency.choices, null=True, blank=True
     )
+    payment_expires_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.CONFIRMED
     )
@@ -272,6 +275,13 @@ class Reservation(models.Model):
                 ),
                 name="reservation_rate_and_currency_valid",
             ),
+            models.CheckConstraint(
+                condition=(
+                    Q(status="pending_payment", payment_expires_at__isnull=False)
+                    | ~Q(status="pending_payment")
+                ),
+                name="reservation_pending_payment_has_expiry",
+            ),
             ExclusionConstraint(
                 name="exclude_overlapping_active_room_reservations",
                 expressions=[
@@ -287,7 +297,9 @@ class Reservation(models.Model):
                         RangeOperators.OVERLAPS,
                     ),
                 ],
-                condition=Q(status__in=["confirmed", "checked_in"]),
+                condition=Q(
+                    status__in=["pending_payment", "confirmed", "checked_in"]
+                ),
             ),
         ]
 
@@ -332,6 +344,10 @@ class Reservation(models.Model):
             )
         if self.rate_per_night is not None and self.rate_per_night < 0:
             raise ValidationError({"rate_per_night": "Rate cannot be negative."})
+        if self.status == self.Status.PENDING_PAYMENT and not self.payment_expires_at:
+            raise ValidationError(
+                {"payment_expires_at": "A payment hold must have an expiration time."}
+            )
 
     @property
     def total_amount(self):

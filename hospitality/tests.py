@@ -1,12 +1,15 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
+from io import StringIO
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
 from django.core.exceptions import ValidationError
+from django.core.management import call_command
 from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from .models import (
     Guest,
@@ -81,6 +84,21 @@ class ReservationConstraintTests(TestCase):
 
         self.assertIsNotNone(active.pk)
 
+    def test_database_rejects_overlap_with_pending_payment_reservation(self):
+        self.make_reservation(
+            self.first_guest,
+            date(2026, 12, 1),
+            date(2026, 12, 5),
+            status=Reservation.Status.PENDING_PAYMENT,
+            payment_expires_at=timezone.now() + timedelta(minutes=15),
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self.make_reservation(
+                    self.second_guest, date(2026, 12, 3), date(2026, 12, 7)
+                )
+
 
 class BookingWorkflowTests(TestCase):
     @classmethod
@@ -132,6 +150,50 @@ class BookingWorkflowTests(TestCase):
         )
 
         self.assertNotIn(self.room, rooms)
+
+    def test_pending_payment_holds_room_until_expiry(self):
+        guest = Guest.objects.create(
+            hotel=self.hotel, first_name="Aster", last_name="Guest"
+        )
+        reservation = Reservation.objects.create(
+            room=self.room,
+            guest=guest,
+            check_in=self.check_in,
+            check_out=self.check_out,
+            status=Reservation.Status.PENDING_PAYMENT,
+            payment_expires_at=timezone.now() + timedelta(minutes=15),
+        )
+
+        self.assertNotIn(
+            self.room,
+            available_rooms(
+                hotel=self.hotel,
+                check_in=self.check_in,
+                check_out=self.check_out,
+            ),
+        )
+
+        reservation.payment_expires_at = timezone.now() - timedelta(seconds=1)
+        reservation.save(update_fields=["payment_expires_at"])
+        rooms = available_rooms(
+            hotel=self.hotel,
+            check_in=self.check_in,
+            check_out=self.check_out,
+        )
+        reservation.refresh_from_db()
+
+        self.assertIn(self.room, rooms)
+        self.assertEqual(reservation.status, Reservation.Status.EXPIRED)
+        next_guest = Guest.objects.create(
+            hotel=self.hotel, first_name="Dawit", last_name="Guest"
+        )
+        next_reservation = Reservation.objects.create(
+            room=self.room,
+            guest=next_guest,
+            check_in=self.check_in,
+            check_out=self.check_out,
+        )
+        self.assertEqual(next_reservation.status, Reservation.Status.CONFIRMED)
 
     def test_staff_can_search_and_open_an_available_room(self):
         response = self.client.get(
@@ -342,6 +404,126 @@ class HousekeepingTaskTests(TestCase):
             ValidationError, "The staff member must be assigned to this room's hotel."
         ):
             task.full_clean()
+
+
+class PublicBookingTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if connection.vendor != "postgresql":
+            raise RuntimeError("Public booking tests require PostgreSQL.")
+
+    def setUp(self):
+        self.hotel = Hotel.objects.create(
+            name="Lake Hotel", code="lake-hotel", city="Hawassa"
+        )
+        room_type = RoomType.objects.create(
+            hotel=self.hotel, name="Standard", max_occupancy=2, base_rate="1000.00"
+        )
+        self.room = Room.objects.create(
+            hotel=self.hotel, room_type=room_type, room_number="101"
+        )
+        self.check_in = date(2026, 12, 1)
+        self.check_out = date(2026, 12, 5)
+
+    def booking_data(self):
+        return {
+            "room": self.room.pk,
+            "check_in": self.check_in,
+            "check_out": self.check_out,
+            "guest_count": 2,
+            "first_name": "Aster",
+            "last_name": "Guest",
+            "email": "aster@example.com",
+            "phone": "555-0100",
+        }
+
+    def test_public_search_is_available_without_login(self):
+        response = self.client.get(
+            reverse("hospitality:public_availability"),
+            {
+                "hotel": self.hotel.pk,
+                "check_in": self.check_in,
+                "check_out": self.check_out,
+                "guest_count": 1,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.hotel.name)
+        self.assertContains(response, "room 101")
+        self.assertContains(response, "Select room")
+
+        response = self.client.get(
+            reverse("hospitality:create_public_booking"),
+            {
+                "hotel": self.hotel.pk,
+                "check_in": self.check_in,
+                "check_out": self.check_out,
+                "guest_count": 1,
+                "room": self.room.pk,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Guest first name")
+        self.assertContains(response, "Place 15-minute hold")
+
+    def test_public_booking_creates_a_pending_payment_hold(self):
+        before = timezone.now()
+        response = self.client.post(
+            reverse("hospitality:create_public_booking"), self.booking_data()
+        )
+        after = timezone.now()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Room held pending payment")
+        self.assertContains(response, "not confirmed")
+        reservation = Reservation.objects.get()
+        self.assertEqual(reservation.status, Reservation.Status.PENDING_PAYMENT)
+        self.assertEqual(reservation.guest.hotel, self.hotel)
+        self.assertEqual(reservation.total_amount, Decimal("4000.00"))
+        self.assertGreaterEqual(
+            reservation.payment_expires_at,
+            before + timedelta(minutes=15),
+        )
+        self.assertLessEqual(
+            reservation.payment_expires_at,
+            after + timedelta(minutes=15),
+        )
+
+    def test_public_booking_requires_an_email_address(self):
+        booking_data = self.booking_data()
+        booking_data["email"] = ""
+
+        response = self.client.post(
+            reverse("hospitality:create_public_booking"), booking_data
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("email", response.context["form"].errors)
+        self.assertEqual(Reservation.objects.count(), 0)
+        self.assertEqual(Guest.objects.count(), 0)
+
+    def test_expiration_command_releases_stale_holds(self):
+        guest = Guest.objects.create(
+            hotel=self.hotel, first_name="Aster", last_name="Guest"
+        )
+        reservation = Reservation.objects.create(
+            room=self.room,
+            guest=guest,
+            check_in=self.check_in,
+            check_out=self.check_out,
+            status=Reservation.Status.PENDING_PAYMENT,
+            payment_expires_at=timezone.now() - timedelta(seconds=1),
+        )
+        output = StringIO()
+
+        call_command("expire_pending_reservations", stdout=output)
+        reservation.refresh_from_db()
+
+        self.assertEqual(reservation.status, Reservation.Status.EXPIRED)
+        self.assertIn("Expired 1", output.getvalue())
 
 
 class HotelAccessTests(TestCase):

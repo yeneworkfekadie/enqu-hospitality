@@ -11,9 +11,12 @@ class AvailabilitySearchForm(forms.Form):
     check_out = forms.DateField(widget=forms.DateInput(attrs={"type": "date"}))
     guest_count = forms.IntegerField(min_value=1, initial=1, label="Number of guests")
 
-    def __init__(self, *args, user, **kwargs):
+    def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["hotel"].queryset = hotels_for_user(user).filter(is_active=True)
+        hotels = Hotel.objects.filter(is_active=True)
+        if user is not None:
+            hotels = hotels.filter(pk__in=hotels_for_user(user))
+        self.fields["hotel"].queryset = hotels
 
     def clean(self):
         cleaned_data = super().clean()
@@ -37,11 +40,19 @@ class ReservationBookingForm(forms.Form):
     email = forms.EmailField(required=False)
     phone = forms.CharField(max_length=30, required=False)
 
-    def __init__(self, *args, user, **kwargs):
+    def __init__(self, *args, user=None, public=False, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["room"].queryset = Room.objects.filter(
-            hotel__in=hotels_for_user(user)
-        ).select_related("hotel", "room_type")
+        if public:
+            self.fields["room"].queryset = Room.objects.filter(
+                hotel__is_active=True
+            ).select_related("hotel", "room_type")
+            self.fields["email"].required = True
+        elif user is not None:
+            self.fields["room"].queryset = Room.objects.filter(
+                hotel__in=hotels_for_user(user)
+            ).select_related("hotel", "room_type")
+        else:
+            raise TypeError("Pass a staff user or set public=True.")
 
     def clean(self):
         cleaned_data = super().clean()

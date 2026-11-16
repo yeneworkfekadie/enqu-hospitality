@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Reservation held</title>
+  </head>
+  <body>
+    <h1>Room held pending payment</h1>
+    <p>Reservation number: {{ reservation.pk }}</p>
+    <p>Guest: {{ reservation.guest }}</p>
+    <p>
+      {{ reservation.room.hotel.name }} — room {{ reservation.room.room_number }}
+    </p>
+    <p>{{ reservation.check_in }} to {{ reservation.check_out }}</p>
+    <p>Guests: {{ reservation.guest_count }}</p>
+    {% if reservation.total_amount is not None %}
+      <p>
+        Rate: {{ reservation.rate_per_night }} {{ reservation.rate_currency }} per night.
+        Total: {{ reservation.total_amount }} {{ reservation.rate_currency }}.
+      </p>
+    {% endif %}
+    <p>
+      This reservation is not confirmed. Contact the hotel before
+      {{ reservation.payment_expires_at|date:"M j, Y H:i" }} to complete payment.
+      Online checkout is not available yet.
+    </p>
+    <a href="{% url 'hospitality:public_availability' %}">Search for another stay</a>
+  </body>
+</html>
