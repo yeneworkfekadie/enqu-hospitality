@@ -12,6 +12,13 @@
       {{ reservation.room.hotel.name }} — room {{ reservation.room.room_number }}
     </p>
     <p>{{ reservation.check_in }} to {{ reservation.check_out }}</p>
+    <p>Guests: {{ reservation.guest_count }}</p>
+    {% if reservation.total_amount is not None %}
+      <p>
+        Rate: {{ reservation.rate_per_night }} {{ reservation.rate_currency }} per night.
+        Total: {{ reservation.total_amount }} {{ reservation.rate_currency }}.
+      </p>
+    {% endif %}
     <a href="{% url 'hospitality:availability' %}">Create another reservation</a>
   </body>
 </html>

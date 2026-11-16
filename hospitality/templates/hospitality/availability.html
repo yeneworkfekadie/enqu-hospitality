@@ -20,8 +20,9 @@
           {% for room in rooms %}
             <li>
               {{ room.hotel.name }} — {{ room.room_type.name }},
-              room {{ room.room_number }}
-              <a href="{% url 'hospitality:create_booking' %}?hotel={{ search.hotel.pk }}&amp;check_in={{ search.check_in|date:'Y-m-d' }}&amp;check_out={{ search.check_out|date:'Y-m-d' }}&amp;room={{ room.pk }}">Book this room</a>
+              room {{ room.room_number }} (up to {{ room.room_type.max_occupancy }} guests),
+              {{ room.room_type.base_rate }} {{ room.room_type.rate_currency }} per night.
+              <a href="{% url 'hospitality:create_booking' %}?hotel={{ search.hotel.pk }}&amp;check_in={{ search.check_in|date:'Y-m-d' }}&amp;check_out={{ search.check_out|date:'Y-m-d' }}&amp;guest_count={{ search.guest_count }}&amp;room={{ room.pk }}">Book this room</a>
             </li>
           {% endfor %}
         </ul>

@@ -14,10 +14,23 @@ BOOKING_PERMISSIONS = (
 )
 
 
+def _booking_quote(room, check_in, check_out):
+    if not room or not check_in or not check_out or check_out <= check_in:
+        return None
+    nights = (check_out - check_in).days
+    rate = room.room_type.base_rate
+    return {
+        "nights": nights,
+        "rate_per_night": rate,
+        "currency": room.room_type.rate_currency,
+        "total": rate * nights,
+    }
+
+
 @login_required(login_url="/admin/login/")
 @permission_required(BOOKING_PERMISSIONS, raise_exception=True)
 def availability(request):
-    form = AvailabilitySearchForm(request.GET or None)
+    form = AvailabilitySearchForm(request.GET or None, user=request.user)
     rooms = None
     search = None
 
@@ -27,6 +40,7 @@ def availability(request):
             hotel=search["hotel"],
             check_in=search["check_in"],
             check_out=search["check_out"],
+            guest_count=search["guest_count"],
         )
 
     return render(
@@ -40,7 +54,7 @@ def availability(request):
 @permission_required(BOOKING_PERMISSIONS, raise_exception=True)
 def create_booking(request):
     if request.method == "POST":
-        form = ReservationBookingForm(request.POST)
+        form = ReservationBookingForm(request.POST, user=request.user)
         if form.is_valid():
             guest_data = {
                 field: form.cleaned_data[field]
@@ -51,6 +65,7 @@ def create_booking(request):
                     room=form.cleaned_data["room"],
                     check_in=form.cleaned_data["check_in"],
                     check_out=form.cleaned_data["check_out"],
+                    guest_count=form.cleaned_data["guest_count"],
                     guest_data=guest_data,
                 )
             except ValidationError as error:
@@ -63,13 +78,18 @@ def create_booking(request):
                 )
 
         room = form.cleaned_data.get("room")
+        quote = _booking_quote(
+            room,
+            form.cleaned_data.get("check_in"),
+            form.cleaned_data.get("check_out"),
+        )
         return render(
             request,
             "hospitality/booking.html",
-            {"form": form, "room": room},
+            {"form": form, "room": room, "quote": quote},
         )
 
-    search_form = AvailabilitySearchForm(request.GET)
+    search_form = AvailabilitySearchForm(request.GET, user=request.user)
     if not search_form.is_valid():
         return render(
             request,
@@ -86,6 +106,7 @@ def create_booking(request):
             hotel=search["hotel"],
             check_in=search["check_in"],
             check_out=search["check_out"],
+            guest_count=search["guest_count"],
         ).filter(pk=room_id).first()
     if room is None:
         return render(
@@ -96,10 +117,20 @@ def create_booking(request):
         )
 
     form = ReservationBookingForm(
+        user=request.user,
         initial={
             "room": room.pk,
             "check_in": search["check_in"],
             "check_out": search["check_out"],
+            "guest_count": search["guest_count"],
         }
     )
-    return render(request, "hospitality/booking.html", {"form": form, "room": room})
+    return render(
+        request,
+        "hospitality/booking.html",
+        {
+            "form": form,
+            "room": room,
+            "quote": _booking_quote(room, search["check_in"], search["check_out"]),
+        },
+    )

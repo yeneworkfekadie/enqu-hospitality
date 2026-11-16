@@ -14,10 +14,12 @@ ACTIVE_RESERVATION_STATUSES = (
 
 
 def available_rooms(
-    *, hotel: Hotel, check_in: date, check_out: date
+    *, hotel: Hotel, check_in: date, check_out: date, guest_count: int = 1
 ) -> QuerySet[Room]:
     if check_out <= check_in:
         raise ValidationError({"check_out": "Check-out must be later than check-in."})
+    if guest_count < 1:
+        raise ValidationError({"guest_count": "Enter at least one guest."})
 
     overlapping_reservations = Reservation.objects.filter(
         room_id=OuterRef("pk"),
@@ -30,6 +32,7 @@ def available_rooms(
             hotel=hotel,
             hotel__is_active=True,
             room_type__hotel=hotel,
+            room_type__max_occupancy__gte=guest_count,
         )
         .exclude(status=Room.Status.MAINTENANCE)
         .annotate(has_overlapping_reservation=Exists(overlapping_reservations))
@@ -44,23 +47,32 @@ def create_reservation(
     room: Room,
     check_in: date,
     check_out: date,
+    guest_count: int,
     guest_data: dict[str, str],
 ) -> Reservation:
     if check_out <= check_in:
         raise ValidationError({"check_out": "Check-out must be later than check-in."})
+    if guest_count < 1:
+        raise ValidationError({"guest_count": "Enter at least one guest."})
 
     room = Room.objects.select_for_update().select_related("hotel").get(pk=room.pk)
     if not available_rooms(
-        hotel=room.hotel, check_in=check_in, check_out=check_out
+        hotel=room.hotel,
+        check_in=check_in,
+        check_out=check_out,
+        guest_count=guest_count,
     ).filter(pk=room.pk).exists():
         raise ValidationError("This room is no longer available for those dates.")
 
-    guest = Guest.objects.create(**guest_data)
+    guest = Guest.objects.create(hotel=room.hotel, **guest_data)
     reservation = Reservation(
         room=room,
         guest=guest,
         check_in=check_in,
         check_out=check_out,
+        guest_count=guest_count,
+        rate_per_night=room.room_type.base_rate,
+        rate_currency=room.room_type.rate_currency,
     )
     reservation.full_clean()
     try:

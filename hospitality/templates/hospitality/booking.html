@@ -14,8 +14,16 @@
       <p>
         {{ room.hotel.name }} — {{ room.room_type.name }},
         room {{ room.room_number }}
-        ({{ form.check_in.value }} to {{ form.check_out.value }})
+        ({{ form.check_in.value }} to {{ form.check_out.value }},
+        {{ form.guest_count.value }} guest{{ form.guest_count.value|pluralize }})
       </p>
+      {% if quote %}
+        <p>
+          {{ quote.nights }} night{{ quote.nights|pluralize }} at
+          {{ quote.rate_per_night }} {{ quote.currency }} per night;
+          estimated total {{ quote.total }} {{ quote.currency }}.
+        </p>
+      {% endif %}
       <form method="post">
         {% csrf_token %}
         {{ form.non_field_errors }}
