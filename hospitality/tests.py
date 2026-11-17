@@ -16,11 +16,13 @@ from .models import (
     Hotel,
     HotelStaff,
     HousekeepingTask,
+    Payment,
     Reservation,
     Room,
     RoomType,
 )
 from .services import available_rooms
+from .payments import reject_payment, verify_payment
 
 
 class ReservationConstraintTests(TestCase):
@@ -526,6 +528,138 @@ class PublicBookingTests(TestCase):
         self.assertIn("Expired 1", output.getvalue())
 
 
+class PaymentVerificationTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if connection.vendor != "postgresql":
+            raise RuntimeError("Payment verification tests require PostgreSQL.")
+
+    def setUp(self):
+        self.hotel = Hotel.objects.create(
+            name="Lake Hotel", code="lake-hotel", city="Hawassa"
+        )
+        room_type = RoomType.objects.create(
+            hotel=self.hotel, name="Standard", max_occupancy=2, base_rate="1000.00"
+        )
+        self.room = Room.objects.create(
+            hotel=self.hotel, room_type=room_type, room_number="101"
+        )
+        self.guest = Guest.objects.create(
+            hotel=self.hotel, first_name="Aster", last_name="Guest"
+        )
+        self.reservation = Reservation.objects.create(
+            room=self.room,
+            guest=self.guest,
+            check_in=date(2026, 12, 1),
+            check_out=date(2026, 12, 5),
+            guest_count=1,
+            rate_per_night=Decimal("1000.00"),
+            rate_currency="ETB",
+            status=Reservation.Status.PENDING_PAYMENT,
+            payment_expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        self.user = get_user_model().objects.create_user(
+            username="payment-reviewer", is_staff=True
+        )
+
+    def create_payment(self, amount, **kwargs):
+        values = {
+            "reservation": self.reservation,
+            "amount": Decimal(amount),
+            "currency": "ETB",
+            "method": Payment.Method.CASH,
+            "recorded_by": self.user,
+        }
+        values.update(kwargs)
+        return Payment.objects.create(**values)
+
+    def test_partial_verified_payment_keeps_reservation_pending(self):
+        payment = self.create_payment("1500.00")
+
+        verify_payment(payment_id=payment.pk, reviewed_by=self.user)
+
+        self.reservation.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.VERIFIED)
+        self.assertEqual(payment.reviewed_by, self.user)
+        self.assertIsNotNone(payment.reviewed_at)
+        self.assertEqual(self.reservation.status, Reservation.Status.PENDING_PAYMENT)
+        self.assertEqual(self.reservation.verified_paid_amount, Decimal("1500.00"))
+        self.assertEqual(self.reservation.balance_due, Decimal("2500.00"))
+
+    def test_full_verified_payment_confirms_pending_reservation(self):
+        payment = self.create_payment("4000.00", method=Payment.Method.BANK_TRANSFER)
+
+        verify_payment(payment_id=payment.pk, reviewed_by=self.user)
+
+        self.reservation.refresh_from_db()
+        self.assertEqual(self.reservation.status, Reservation.Status.CONFIRMED)
+        self.assertEqual(self.reservation.balance_due, Decimal("0.00"))
+
+    def test_pending_payment_does_not_count_toward_balance(self):
+        self.create_payment("4000.00")
+
+        self.assertEqual(self.reservation.verified_paid_amount, Decimal("0.00"))
+        self.assertEqual(self.reservation.balance_due, Decimal("4000.00"))
+        self.assertEqual(
+            self.reservation.status,
+            Reservation.Status.PENDING_PAYMENT,
+        )
+
+    def test_verification_rejects_overpayment(self):
+        first_payment = self.create_payment("3000.00")
+        verify_payment(payment_id=first_payment.pk, reviewed_by=self.user)
+        second_payment = self.create_payment("1500.00")
+
+        with self.assertRaisesMessage(
+            ValidationError, "Verified payments cannot exceed the reservation total."
+        ):
+            verify_payment(payment_id=second_payment.pk, reviewed_by=self.user)
+
+        second_payment.refresh_from_db()
+        self.assertEqual(second_payment.status, Payment.Status.PENDING_REVIEW)
+        self.assertEqual(self.reservation.balance_due, Decimal("1000.00"))
+
+    def test_verification_rejects_currency_mismatch(self):
+        payment = self.create_payment("100.00", currency="USD")
+
+        with self.assertRaisesMessage(
+            ValidationError, "Payment currency must match the reservation."
+        ):
+            verify_payment(payment_id=payment.pk, reviewed_by=self.user)
+
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.PENDING_REVIEW)
+
+    def test_expired_hold_is_expired_and_payment_cannot_be_verified(self):
+        payment = self.create_payment("4000.00")
+        self.reservation.payment_expires_at = timezone.now() - timedelta(seconds=1)
+        self.reservation.save(update_fields=["payment_expires_at"])
+
+        with self.assertRaisesMessage(
+            ValidationError, "The reservation payment hold has expired."
+        ):
+            verify_payment(payment_id=payment.pk, reviewed_by=self.user)
+
+        self.reservation.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(self.reservation.status, Reservation.Status.EXPIRED)
+        self.assertEqual(payment.status, Payment.Status.PENDING_REVIEW)
+
+    def test_rejecting_payment_is_audited_and_does_not_confirm_reservation(self):
+        payment = self.create_payment("4000.00")
+
+        reject_payment(payment_id=payment.pk, reviewed_by=self.user)
+
+        self.reservation.refresh_from_db()
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.REJECTED)
+        self.assertEqual(payment.reviewed_by, self.user)
+        self.assertIsNotNone(payment.reviewed_at)
+        self.assertEqual(self.reservation.status, Reservation.Status.PENDING_PAYMENT)
+
+
 class HotelAccessTests(TestCase):
     @classmethod
     def setUpClass(cls):
@@ -561,15 +695,19 @@ class HotelAccessTests(TestCase):
         user = get_user_model().objects.create_user(
             username="front-desk", password="test-password", is_staff=True
         )
+        self.staff_user = user
         front_desk = Group.objects.create(name="Front Desk")
         permissions = Permission.objects.filter(
             content_type__app_label="hospitality",
             codename__in=[
                 "add_guest",
                 "add_reservation",
+                "add_payment",
+                "change_payment",
                 "view_hotel",
                 "view_guest",
                 "view_housekeepingtask",
+                "view_payment",
                 "view_reservation",
                 "view_room",
                 "view_roomtype",
@@ -613,6 +751,97 @@ class HotelAccessTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, str(first_task.room))
         self.assertNotContains(response, str(second_task.room))
+
+    def test_payment_admin_lists_only_payments_for_assigned_hotels(self):
+        first_guest = Guest.objects.create(
+            hotel=self.first_hotel, first_name="Aster", last_name="First"
+        )
+        second_guest = Guest.objects.create(
+            hotel=self.second_hotel, first_name="Dawit", last_name="Second"
+        )
+        first_reservation = Reservation.objects.create(
+            room=self.first_room,
+            guest=first_guest,
+            check_in=date(2026, 12, 1),
+            check_out=date(2026, 12, 3),
+            rate_per_night=Decimal("1000.00"),
+            rate_currency="ETB",
+        )
+        second_reservation = Reservation.objects.create(
+            room=self.second_room,
+            guest=second_guest,
+            check_in=date(2026, 12, 1),
+            check_out=date(2026, 12, 3),
+            rate_per_night=Decimal("1200.00"),
+            rate_currency="ETB",
+        )
+        Payment.objects.create(
+            reservation=first_reservation,
+            amount=Decimal("100.00"),
+            currency="ETB",
+            method=Payment.Method.CASH,
+            recorded_by=self.staff_user,
+        )
+        Payment.objects.create(
+            reservation=second_reservation,
+            amount=Decimal("100.00"),
+            currency="ETB",
+            method=Payment.Method.CASH,
+            recorded_by=get_user_model().objects.create_user(
+                username="other-hotel-cashier"
+            ),
+        )
+
+        response = self.client.get(reverse("admin:hospitality_payment_changelist"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Aster First")
+        self.assertNotContains(response, "Dawit Second")
+
+    def test_staff_can_verify_a_payment_from_the_admin_action(self):
+        guest = Guest.objects.create(
+            hotel=self.first_hotel, first_name="Aster", last_name="First"
+        )
+        reservation = Reservation.objects.create(
+            room=self.first_room,
+            guest=guest,
+            check_in=date(2026, 12, 1),
+            check_out=date(2026, 12, 3),
+            rate_per_night=Decimal("1000.00"),
+            rate_currency="ETB",
+            status=Reservation.Status.PENDING_PAYMENT,
+            payment_expires_at=timezone.now() + timedelta(minutes=15),
+        )
+        payment = Payment.objects.create(
+            reservation=reservation,
+            amount=Decimal("2000.00"),
+            currency="ETB",
+            method=Payment.Method.TELEBIRR_MANUAL,
+            recorded_by=self.staff_user,
+            reference="manual-receipt-1",
+        )
+
+        response = self.client.post(
+            reverse("admin:hospitality_payment_changelist"),
+            {
+                "action": "verify_selected_payments",
+                "_selected_action": [payment.pk],
+                "index": "0",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        payment.refresh_from_db()
+        reservation.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.VERIFIED)
+        self.assertEqual(payment.reviewed_by, self.staff_user)
+        self.assertEqual(reservation.status, Reservation.Status.CONFIRMED)
+        self.assertEqual(
+            self.client.get(
+                reverse("admin:hospitality_payment_change", args=[payment.pk])
+            ).status_code,
+            200,
+        )
 
     def test_guest_and_reservation_admin_lists_are_property_scoped(self):
         first_guest = Guest.objects.create(

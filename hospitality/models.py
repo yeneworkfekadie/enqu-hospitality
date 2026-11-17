@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.conf import settings
 from django.contrib.postgres.constraints import ExclusionConstraint
 from django.contrib.postgres.fields import RangeOperators
@@ -355,5 +357,97 @@ class Reservation(models.Model):
             return None
         return self.rate_per_night * (self.check_out - self.check_in).days
 
+    @property
+    def verified_paid_amount(self):
+        return self.payments.filter(status=Payment.Status.VERIFIED).aggregate(
+            total=models.Sum("amount")
+        )["total"] or Decimal("0.00")
+
+    @property
+    def balance_due(self):
+        total = self.total_amount
+        if total is None:
+            return None
+        return max(total - self.verified_paid_amount, 0)
+
     def __str__(self):
         return f"{self.guest} - {self.room} ({self.check_in} to {self.check_out})"
+
+
+class Payment(models.Model):
+    class Method(models.TextChoices):
+        CASH = "cash", "Cash"
+        BANK_TRANSFER = "bank_transfer", "Bank transfer"
+        TELEBIRR_MANUAL = "telebirr_manual", "Telebirr (manually verified)"
+
+    class Status(models.TextChoices):
+        PENDING_REVIEW = "pending_review", "Pending review"
+        VERIFIED = "verified", "Verified"
+        REJECTED = "rejected", "Rejected"
+
+    reservation = models.ForeignKey(
+        Reservation, on_delete=models.PROTECT, related_name="payments"
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, choices=Currency.choices)
+    method = models.CharField(max_length=24, choices=Method.choices)
+    reference = models.CharField(max_length=120, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.PENDING_REVIEW,
+    )
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="recorded_hospitality_payments",
+    )
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="reviewed_hospitality_payments",
+        null=True,
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(amount__gt=0), name="payment_amount_positive"
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        status__in=["verified", "rejected"],
+                        reviewed_by__isnull=False,
+                        reviewed_at__isnull=False,
+                    )
+                    | ~Q(status__in=["verified", "rejected"])
+                ),
+                name="reviewed_payment_has_reviewer_and_time",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.amount is not None and self.amount <= 0:
+            raise ValidationError(
+                {"amount": "Payment amount must be greater than zero."}
+            )
+        if self.reservation_id:
+            if self.reservation.rate_currency and (
+                self.currency != self.reservation.rate_currency
+            ):
+                raise ValidationError(
+                    {"currency": "Payment currency must match the reservation."}
+                )
+            if self.reservation.total_amount is None:
+                raise ValidationError(
+                    {"reservation": "This reservation has no saved total to pay."}
+                )
+
+    def __str__(self):
+        return f"{self.reservation} — {self.amount} {self.currency} ({self.status})"

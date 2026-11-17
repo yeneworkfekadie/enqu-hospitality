@@ -1,5 +1,6 @@
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 
 from .access import hotels_for_user
 from .models import (
@@ -7,10 +8,12 @@ from .models import (
     Hotel,
     HotelStaff,
     HousekeepingTask,
+    Payment,
     Reservation,
     Room,
     RoomType,
 )
+from .payments import reject_payment, verify_payment
 
 
 @admin.register(Hotel)
@@ -215,7 +218,10 @@ class ReservationAdmin(admin.ModelAdmin):
 
     def get_readonly_fields(self, request, obj=None):
         if obj:
-            return ("rate_per_night", "rate_currency", "total_amount")
+            fields = ["rate_per_night", "rate_currency", "total_amount"]
+            if obj.status == Reservation.Status.PENDING_PAYMENT:
+                fields.append("status")
+            return tuple(fields)
         return ("total_amount",)
 
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
@@ -236,3 +242,113 @@ class ReservationAdmin(admin.ModelAdmin):
                 obj.rate_per_night = obj.room.room_type.base_rate
                 obj.rate_currency = obj.room.room_type.rate_currency
         super().save_model(request, obj, form, change)
+
+
+@admin.register(Payment)
+class PaymentAdmin(admin.ModelAdmin):
+    list_display = (
+        "reservation",
+        "amount",
+        "currency",
+        "method",
+        "status",
+        "recorded_by",
+        "reviewed_by",
+        "created_at",
+    )
+    list_filter = ("status", "method", "currency", "created_at")
+    search_fields = (
+        "reservation__guest__first_name",
+        "reservation__guest__last_name",
+        "reservation__room__hotel__name",
+        "reference",
+    )
+    readonly_fields = (
+        "status",
+        "recorded_by",
+        "reviewed_by",
+        "created_at",
+        "reviewed_at",
+    )
+    actions = ("verify_selected_payments", "reject_selected_payments")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).filter(
+            reservation__room__hotel__in=hotels_for_user(request.user)
+        )
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "reservation":
+            kwargs["queryset"] = Reservation.objects.filter(
+                room__hotel__in=hotels_for_user(request.user)
+            ).select_related("guest", "room", "room__hotel")
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj and obj.status != Payment.Status.PENDING_REVIEW:
+            return (
+                "reservation",
+                "amount",
+                "currency",
+                "method",
+                "reference",
+                "status",
+                "recorded_by",
+                "reviewed_by",
+                "created_at",
+                "reviewed_at",
+            )
+        return self.readonly_fields
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.recorded_by = request.user
+        super().save_model(request, obj, form, change)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @admin.action(description="Verify selected pending payments")
+    def verify_selected_payments(self, request, queryset):
+        verified_count = 0
+        for payment in queryset:
+            try:
+                verify_payment(payment_id=payment.pk, reviewed_by=request.user)
+            except ValidationError as error:
+                self.message_user(
+                    request,
+                    f"Payment {payment.pk}: {error.messages[0]}",
+                    level=messages.ERROR,
+                )
+            else:
+                verified_count += 1
+        if verified_count:
+            self.message_user(
+                request,
+                (
+                    f"Verified {verified_count} payment(s). Fully paid pending "
+                    "reservations are confirmed."
+                ),
+                level=messages.SUCCESS,
+            )
+
+    @admin.action(description="Reject selected pending payments")
+    def reject_selected_payments(self, request, queryset):
+        rejected_count = 0
+        for payment in queryset:
+            try:
+                reject_payment(payment_id=payment.pk, reviewed_by=request.user)
+            except ValidationError as error:
+                self.message_user(
+                    request,
+                    f"Payment {payment.pk}: {error.messages[0]}",
+                    level=messages.ERROR,
+                )
+            else:
+                rejected_count += 1
+        if rejected_count:
+            self.message_user(
+                request,
+                f"Rejected {rejected_count} payment(s).",
+                level=messages.SUCCESS,
+            )

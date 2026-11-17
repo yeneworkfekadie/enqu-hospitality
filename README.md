@@ -77,6 +77,21 @@ production) to expire pending payment holds whose deadlines have passed:
 docker compose exec -T web python manage.py expire_pending_reservations
 ```
 
+## Payment recording and verification
+
+Staff with payment add, view, and change permissions can record cash, bank
+transfer, or Telebirr receipts in the admin under **Payments**. Recording a
+payment does not count it toward the reservation balance. A staff member must
+use the **Verify selected pending payments** action after checking the receipt.
+Verified partial payments reduce the balance; verifying the full amount
+confirms a pending reservation. Verification is blocked for expired holds,
+currency mismatches, and overpayments. Rejected and verified payments retain
+the reviewing staff member and review time, and payment records cannot be
+deleted. Telebirr entries are manual only; automated checkout and payment
+callbacks still require the official merchant integration guide. If a
+partially paid hold expires, its verified payment remains in the ledger; refund
+processing is not implemented yet and must be handled outside the platform.
+
 ## Housekeeping
 
 Housekeeping tasks can be scheduled, assigned to staff assigned to the room's
